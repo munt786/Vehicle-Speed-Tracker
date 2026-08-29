@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vehicle Speed Tracker | Computer Vision & Perspective Transformation</title>
+    <!-- Modern Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-primary: #0a0d14;
+            --bg-card: rgba(18, 24, 38, 0.75);
+            --border-color: rgba(255, 255, 255, 0.1);
+            --accent-cyan: #00f2fe;
+            --accent-blue: #4facfe;
+            --accent-green: #00e676;
+            --accent-yellow: #ffb300;
+            --accent-red: #ff3d00;
+            --text-primary: #f0f4f8;
+            --text-secondary: #94a3b8;
+            --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background-image: 
+                radial-gradient(circle at 15% 20%, rgba(0, 242, 254, 0.08) 0%, transparent 45%),
+                radial-gradient(circle at 85% 80%, rgba(79, 172, 254, 0.08) 0%, transparent 45%);
+            overflow-x: hidden;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.25rem 2rem;
+            background: rgba(10, 13, 20, 0.85);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 15px rgba(0, 242, 254, 0.4);
+        }
+
+        .logo-icon svg {
+            width: 22px;
+            height: 22px;
+            fill: #0a0d14;
+        }
+
+        h1 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, #ffffff, var(--text-secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 0.9rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ff4757;
+            box-shadow: 0 0 8px #ff4757;
+            transition: all 0.3s ease;
+        }
+
+        .status-dot.connected {
+            background: var(--accent-green);
+            box-shadow: 0 0 8px var(--accent-green);
+        }
+
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 340px;
+            gap: 1.5rem;
+            padding: 1.5rem 2rem;
+            max-width: 1600px;
+            margin: 0 auto;
+            width: 100%;
+            flex: 1;
+        }
+
+        @media (max-width: 1024px) {
+            .main-container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .viewport-card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--glass-shadow);
+            backdrop-filter: blur(12px);
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .viewport-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .viewport-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .canvas-wrapper {
+            position: relative;
+            width: 100%;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #000;
+            aspect-ratio: 16 / 9;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        /* Hidden video element used for webcam capture */
+        #webcam {
+            display: none;
+        }
+
+        /* Main interactive canvas */
+        #displayCanvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            cursor: default;
+        }
+
+        #displayCanvas.calibrating {
+            cursor: crosshair;
+        }
+
+        .overlay-instruction {
+            position: absolute;
+            top: 1rem;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(10, 13, 20, 0.85);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--accent-cyan);
+            color: var(--accent-cyan);
+            padding: 0.5rem 1.25rem;
+            border-radius: 30px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            pointer-events: none;
+            box-shadow: 0 0 15px rgba(0, 242, 254, 0.2);
+            transition: all 0.3s ease;
+        }
+
+        .controls-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        .panel-card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--glass-shadow);
+            backdrop-filter: blur(12px);
+            padding: 1.25rem;
+        }
+
+        .panel-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            flex: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1rem;
+            border-radius: 10px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s ease;
+            text-decoration: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+            color: #0a0d14;
+            box-shadow: 0 4px 15px rgba(0, 242, 254, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 242, 254, 0.4);
+        }
+
+        .btn-primary.active {
+            background: linear-gradient(135deg, var(--accent-yellow), #ff8f00);
+            box-shadow: 0 4px 15px rgba(255, 179, 0, 0.4);
+            color: #000;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.14);
+            transform: translateY(-2px);
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+            margin-top: 0.5rem;
+        }
+
+        .metric-box {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .metric-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .metric-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent-cyan);
+        }
+
+        .vehicle-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+            max-height: 260px;
+            overflow-y: auto;
+            padding-right: 0.25rem;
+        }
+
+        .vehicle-list::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .vehicle-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+        }
+
+        .vehicle-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.04);
+            border-left: 4px solid var(--accent-green);
+            padding: 0.6rem 0.85rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+        }
+
+        .vehicle-item.speeding {
+            border-left-color: var(--accent-red);
+            background: rgba(255, 61, 0, 0.08);
+        }
+
+        .vehicle-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .vehicle-name {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .vehicle-id {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .vehicle-speed {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            font-size: 1rem;
+            color: var(--accent-green);
+        }
+
+        .vehicle-item.speeding .vehicle-speed {
+            color: var(--accent-red);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 1.5rem 0;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+        .setting-group {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 0.6rem;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 0.5rem 0.85rem;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .setting-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .setting-input {
+            width: 80px;
+            background: rgba(10, 13, 20, 0.9);
+            border: 1px solid var(--accent-cyan);
+            color: var(--accent-cyan);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            font-weight: 600;
+            padding: 0.3rem 0.5rem;
+            border-radius: 6px;
+            text-align: center;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .setting-input:focus {
+            box-shadow: 0 0 10px rgba(0, 242, 254, 0.4);
+            border-color: #ffffff;
+        }
+
+        /* Hide default browser number input spinner arrows */
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { 
+            -webkit-appearance: none; 
+            margin: 0; 
+        }
+        input[type=number] {
+            -moz-appearance: textfield;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo-container">
+            <div class="logo-icon">
+                <svg viewBox="0 0 24 24">
+                    <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.85 7h10.29l1.04 3H5.81l1.04-3zM19 17H5v-4h14v4z"/>
+                    <circle cx="7.5" cy="15" r="1.5"/>
+                    <circle cx="16.5" cy="15" r="1.5"/>
+                </svg>
+            </div>
+            <h1>Vehicle Speed Tracking System</h1>
+        </div>
+        <div class="status-badge">
+            <div id="statusDot" class="status-dot"></div>
+            <span id="statusText">Connecting to Backend...</span>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <!-- Live Video Viewport -->
+        <section class="viewport-card">
+            <div class="viewport-header">
+                <div class="viewport-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                        <circle cx="12" cy="13" r="4"/>
+                    </svg>
+                    Live Camera Feed & AI Telemetry
+                </div>
+            </div>
+
+            <div class="canvas-wrapper">
+                <!-- Hidden camera element -->
+                <video id="webcam" autoplay playsinline muted></video>
+                
+                <!-- Main Canvas output & click target -->
+                <canvas id="displayCanvas" width="1280" height="720"></canvas>
+
+                <!-- Interactive instruction banner -->
+                <div id="instructionBanner" class="overlay-instruction" style="display: none;">
+                    Click 4 corners on the road surface to calibrate perspective (0/4)
+                </div>
+            </div>
+        </section>
+
+        <!-- Right Control & Monitoring Panel -->
+        <aside class="controls-panel">
+            <!-- Controls & Config Card -->
+            <div class="panel-card">
+                <div class="panel-title">Calibration & Settings</div>
+                <div class="btn-group">
+                    <button id="calibrateBtn" class="btn btn-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                            <polyline points="2 17 12 22 22 17"/>
+                            <polyline points="2 12 12 17 22 12"/>
+                        </svg>
+                        <span id="calibrateBtnText">Calibrate</span>
+                    </button>
+                    <button id="clearBtn" class="btn btn-secondary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"/>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        </svg>
+                        Reset
+                    </button>
+                </div>
+
+                <div class="setting-group" style="margin-top: 0.85rem;">
+                    <span class="setting-label">Speed Limit (km/h)</span>
+                    <input type="number" id="speedLimitInput" class="setting-input" value="50" min="5" max="200" step="5">
+                </div>
+
+                <div class="setting-group">
+                    <span class="setting-label">ROI Distance (meters)</span>
+                    <input type="number" id="roiDistanceInput" class="setting-input" value="10.0" min="1" max="100" step="0.5">
+                </div>
+            </div>
+
+            <!-- Real-time Metrics Card -->
+            <div class="panel-card">
+                <div class="panel-title">Traffic Telemetry & Metrics</div>
+                <div class="metrics-grid">
+                    <div class="metric-box">
+                        <span class="metric-label">Active Vehicles</span>
+                        <span id="metricCount" class="metric-value">0</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="metric-label">Max Speed</span>
+                        <span id="metricMaxSpeed" class="metric-value">0.0 <small style="font-size: 0.7rem;">km/h</small></span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="metric-label">Total Logged</span>
+                        <span id="metricTotal" class="metric-value">0</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="metric-label" id="violationLabel">Violations (>50km/h)</span>
+                        <span id="metricViolations" class="metric-value" style="color: var(--accent-red);">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Top 10 Vehicle Speed Log Card -->
+            <div class="panel-card" style="flex: 1; display: flex; flex-direction: column;">
+                <div class="panel-title" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>Top 10 Vehicle Log</span>
+                    <span style="font-size: 0.75rem; color: var(--accent-cyan); text-transform: none;">Max Speeds</span>
+                </div>
+                <div id="vehicleList" class="vehicle-list">
+                    <div class="empty-state">No vehicles logged yet</div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- Custom Frontend Application Script -->
+    <script src="/static/app.js"></script>
+</body>
+</html>

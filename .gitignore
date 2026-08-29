@@ -1,0 +1,24 @@
+# Virtual Environments & Installed Packages
+speed_tracker_env/
+Lib/
+lib/
+Scripts/
+scripts/
+share/
+env/
+venv/
+ENV/
+
+# Python Cache & Bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Operating System & Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
