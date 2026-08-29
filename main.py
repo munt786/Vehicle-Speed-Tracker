@@ -72,37 +72,46 @@ class SpeedTracker:
 
     def set_calibration(self, points: List[List[float]]) -> bool:
         """
-        Sets source calibration points and computes homography matrix M.
+        Sets source calibration points and computes homography matrix M safely.
         Sorts points in order: Top-Left, Top-Right, Bottom-Right, Bottom-Left.
         """
         if len(points) != 4:
             return False
 
-        pts = np.array(points, dtype=np.float32)
-        sums = pts.sum(axis=1)
-        diffs = np.diff(pts, axis=1).flatten()
+        try:
+            pts = np.array(points, dtype=np.float32)
+            sums = pts.sum(axis=1)
+            diffs = np.diff(pts, axis=1).flatten()
 
-        top_left = pts[np.argmin(sums)]
-        bottom_right = pts[np.argmax(sums)]
-        top_right = pts[np.argmin(diffs)]
-        bottom_left = pts[np.argmax(diffs)]
+            top_left = pts[np.argmin(sums)]
+            bottom_right = pts[np.argmax(sums)]
+            top_right = pts[np.argmin(diffs)]
+            bottom_left = pts[np.argmax(diffs)]
 
-        ordered_src = np.float32([top_left, top_right, bottom_right, bottom_left])
-        self.src_pts = ordered_src
-        self.M = cv2.getPerspectiveTransform(ordered_src, self.dst_pts)
-        return True
+            ordered_src = np.float32([top_left, top_right, bottom_right, bottom_left])
+            self.src_pts = ordered_src
+            self.M = cv2.getPerspectiveTransform(ordered_src, self.dst_pts)
+            return True
+        except Exception as e:
+            print(f"Calibration matrix calculation error: {e}")
+            return False
 
     def transform_point(self, x: float, y: float) -> Optional[Tuple[float, float]]:
         """
-        Maps a 2D image coordinate (x,y) to Bird's-Eye View coordinate.
+        Maps a 2D image coordinate (x,y) to Bird's-Eye View coordinate safely.
         """
         if self.M is None:
             return None
 
-        pts = np.array([[[x, y]]], dtype=np.float32)
-        transformed = cv2.perspectiveTransform(pts, self.M)
-        bx, by = transformed[0][0]
-        return float(bx), float(by)
+        try:
+            pts = np.array([[[x, y]]], dtype=np.float32)
+            transformed = cv2.perspectiveTransform(pts, self.M)
+            bx, by = transformed[0][0]
+            if math.isnan(bx) or math.isnan(by) or math.isinf(bx) or math.isinf(by):
+                return None
+            return float(bx), float(by)
+        except Exception:
+            return None
 
     def update_vehicle(self, track_id: int, bbox: Tuple[float, float, float, float], class_name: str, current_time: float, roi_distance: float = 10.0, speed_limit: float = 50.0) -> Tuple[Optional[float], Optional[Tuple[float, float]]]:
         """

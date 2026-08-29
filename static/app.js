@@ -249,14 +249,16 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!isCalibrating) return;
 
         const rect = canvas.getBoundingClientRect();
-        const scaleX = canvas.width / rect.width;
-        const scaleY = canvas.height / rect.height;
+        if (!rect.width || !rect.height) return;
 
-        const clickX = (clientX - rect.left) * scaleX;
-        const clickY = (clientY - rect.top) * scaleY;
+        const clickX = ((clientX - rect.left) / rect.width) * canvas.width;
+        const clickY = ((clientY - rect.top) / rect.height) * canvas.height;
+
+        const px = Math.max(0, Math.min(canvas.width, Math.round(clickX)));
+        const py = Math.max(0, Math.min(canvas.height, Math.round(clickY)));
 
         if (calibrationPoints.length < 4) {
-            calibrationPoints.push([Math.round(clickX), Math.round(clickY)]);
+            calibrationPoints.push([px, py]);
             updateCalibrationUI();
         }
 
