@@ -125,9 +125,68 @@
             flex: 1;
         }
 
-        @media (max-width: 1024px) {
+        /* Responsive Layout Breakpoints for Mobile, Tablet & Wide Screens */
+        @media (max-width: 1200px) {
+            .main-container {
+                grid-template-columns: 1fr 300px;
+                padding: 1.25rem 1.5rem;
+            }
+        }
+
+        @media (max-width: 900px) {
+            header {
+                padding: 0.85rem 1rem;
+            }
+            h1 {
+                font-size: 1.15rem;
+            }
+            .logo-icon {
+                width: 32px;
+                height: 32px;
+            }
+            .logo-icon svg {
+                width: 18px;
+                height: 18px;
+            }
             .main-container {
                 grid-template-columns: 1fr;
+                padding: 1rem 0.75rem;
+                gap: 1rem;
+            }
+            .viewport-card, .panel-card {
+                padding: 0.85rem;
+                border-radius: 12px;
+            }
+            .overlay-instruction {
+                font-size: 0.75rem;
+                padding: 0.4rem 0.85rem;
+                width: 90%;
+                text-align: center;
+            }
+        }
+
+        @media (max-width: 480px) {
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.5rem;
+            }
+            .status-badge {
+                font-size: 0.75rem;
+                padding: 0.25rem 0.65rem;
+            }
+            .btn {
+                padding: 0.65rem 0.75rem;
+                font-size: 0.82rem;
+            }
+            .metric-value {
+                font-size: 1.15rem;
+            }
+            .setting-group {
+                padding: 0.5rem 0.65rem;
+            }
+            .setting-label {
+                font-size: 0.75rem;
             }
         }
 
@@ -382,19 +441,45 @@
         }
         .setting-group {
             display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-top: 0.6rem;
+            flex-direction: column;
+            gap: 0.4rem;
+            margin-top: 0.75rem;
             background: rgba(255, 255, 255, 0.03);
-            padding: 0.5rem 0.85rem;
+            padding: 0.65rem 0.85rem;
             border-radius: 10px;
             border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .setting-group.inline {
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
         }
 
         .setting-label {
             font-size: 0.8rem;
             color: var(--text-secondary);
             font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .setting-select {
+            width: 100%;
+            background: rgba(10, 13, 20, 0.9);
+            border: 1px solid var(--accent-cyan);
+            color: var(--accent-cyan);
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.85rem;
+            font-weight: 600;
+            padding: 0.45rem 0.65rem;
+            border-radius: 8px;
+            outline: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .setting-select:focus {
+            box-shadow: 0 0 10px rgba(0, 242, 254, 0.3);
         }
 
         .setting-input {
@@ -498,11 +583,19 @@
                 </div>
 
                 <div class="setting-group" style="margin-top: 0.85rem;">
+                    <span class="setting-label">Tracking Mode</span>
+                    <select id="engineSelect" class="setting-select">
+                        <option value="motion" selected>⚡ Fast Motion Mode (Smooth)</option>
+                        <option value="yolo">🚗 Smart Vehicle AI</option>
+                    </select>
+                </div>
+
+                <div class="setting-group inline">
                     <span class="setting-label">Speed Limit (km/h)</span>
                     <input type="number" id="speedLimitInput" class="setting-input" value="50" min="5" max="200" step="5">
                 </div>
 
-                <div class="setting-group">
+                <div class="setting-group inline">
                     <span class="setting-label">ROI Distance (meters)</span>
                     <input type="number" id="roiDistanceInput" class="setting-input" value="10.0" min="1" max="100" step="0.5">
                 </div>

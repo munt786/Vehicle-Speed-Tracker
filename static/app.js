@@ -203,12 +203,14 @@ document.addEventListener("DOMContentLoaded", () => {
                     captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
                     const base64Data = captureCanvas.toDataURL("image/jpeg", 0.75);
 
+                    const engineVal = document.getElementById("engineSelect") ? document.getElementById("engineSelect").value : "motion";
                     const speedLimitVal = speedLimitInput ? (parseFloat(speedLimitInput.value) || 50.0) : 50.0;
                     const roiDistanceVal = roiDistanceInput ? (parseFloat(roiDistanceInput.value) || 10.0) : 10.0;
 
                     const payload = {
                         image: base64Data,
                         points: calibrationPoints,
+                        engine: engineVal,
                         speed_limit: speedLimitVal,
                         roi_distance: roiDistanceVal
                     };
@@ -223,17 +225,17 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     /**
-     * Calibration Canvas Click Handler
+     * Calibration Canvas Pointer & Mobile Touch Handler
      */
-    canvas.addEventListener("click", (event) => {
+    function handleCalibrationInput(clientX, clientY) {
         if (!isCalibrating) return;
 
         const rect = canvas.getBoundingClientRect();
         const scaleX = canvas.width / rect.width;
         const scaleY = canvas.height / rect.height;
 
-        const clickX = (event.clientX - rect.left) * scaleX;
-        const clickY = (event.clientY - rect.top) * scaleY;
+        const clickX = (clientX - rect.left) * scaleX;
+        const clickY = (clientY - rect.top) * scaleY;
 
         if (calibrationPoints.length < 4) {
             calibrationPoints.push([Math.round(clickX), Math.round(clickY)]);
@@ -247,6 +249,10 @@ document.addEventListener("DOMContentLoaded", () => {
             calibrateBtnText.textContent = "Recalibrate";
             instructionBanner.style.display = "none";
         }
+    }
+
+    canvas.addEventListener("pointerdown", (event) => {
+        handleCalibrationInput(event.clientX, event.clientY);
     });
 
     /**
