@@ -29,6 +29,10 @@ document.addEventListener("DOMContentLoaded", () => {
     let lastFpsCheck = performance.now();
     let currentFps = 0;
 
+    // Mobile Device Detection & Rate Limiting
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 768;
+    let lastSendTime = 0;
+
     // Offscreen canvas for frame capture
     const captureCanvas = document.createElement("canvas");
     captureCanvas.width = 1280;
@@ -42,8 +46,8 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 },
+                    width: { ideal: isMobile ? 720 : 1280 },
+                    height: { ideal: isMobile ? 1280 : 720 },
                     facingMode: "environment"
                 },
                 audio: false
@@ -51,13 +55,22 @@ document.addEventListener("DOMContentLoaded", () => {
             video.srcObject = stream;
             await video.play();
 
-            // Use crisp native camera HD resolution
-            canvas.width = video.videoWidth || 1280;
-            canvas.height = video.videoHeight || 720;
-            captureCanvas.width = canvas.width;
-            captureCanvas.height = canvas.height;
+            // Set canvas size to native camera resolution
+            canvas.width = video.videoWidth || (isMobile ? 720 : 1280);
+            canvas.height = video.videoHeight || (isMobile ? 1280 : 720);
 
-            console.log(`Webcam HD streaming initialized at ${canvas.width}x${canvas.height}`);
+            // Scale capture canvas for mobile 4G bandwidth efficiency
+            if (isMobile) {
+                const maxDim = Math.max(canvas.width, canvas.height);
+                const scale = 640 / maxDim;
+                captureCanvas.width = Math.round(canvas.width * scale);
+                captureCanvas.height = Math.round(canvas.height * scale);
+            } else {
+                captureCanvas.width = canvas.width;
+                captureCanvas.height = canvas.height;
+            }
+
+            console.log(`Webcam initialized at ${canvas.width}x${canvas.height} (Capture: ${captureCanvas.width}x${captureCanvas.height})`);
             initWebSocket();
         } catch (err) {
             console.error("Camera access error:", err);
@@ -74,7 +87,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-        statusText.textContent = "Connecting to WebSocket...";
+        statusText.textContent = "Connecting to Backend...";
         ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
@@ -153,10 +166,10 @@ document.addEventListener("DOMContentLoaded", () => {
             }
             if (calibrationPoints.length === 4) {
                 ctx.closePath();
-                ctx.fillStyle = "rgba(0, 242, 254, 0.15)";
+                ctx.fillStyle = "rgba(0, 255, 128, 0.15)";
                 ctx.fill();
             }
-            ctx.strokeStyle = "#00f2fe";
+            ctx.strokeStyle = "#00ff80";
             ctx.lineWidth = 2.5;
             ctx.setLineDash([6, 4]);
             ctx.stroke();
@@ -165,8 +178,8 @@ document.addEventListener("DOMContentLoaded", () => {
         calibrationPoints.forEach((pt, idx) => {
             ctx.beginPath();
             ctx.arc(pt[0], pt[1], 7, 0, 2 * Math.PI);
-            ctx.fillStyle = "#00f2fe";
-            ctx.shadowColor = "#00f2fe";
+            ctx.fillStyle = "#00ff80";
+            ctx.shadowColor = "#00ff80";
             ctx.shadowBlur = 10;
             ctx.fill();
             ctx.lineWidth = 2;
@@ -194,14 +207,18 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     /**
-     * Continuous Frame Streaming Loop via WebSocket
+     * Continuous Frame Streaming Loop via WebSocket with 4G Bandwidth Rate Limiting
      */
     function startStreaming() {
         function sendFrameLoop() {
-            if (ws && ws.readyState === WebSocket.OPEN && !isSendingFrame) {
+            const now = Date.now();
+            const minInterval = isMobile ? 65 : 30; // Max ~15 FPS on 4G mobile, 30 FPS on desktop
+
+            if ((now - lastSendTime >= minInterval) && ws && ws.readyState === WebSocket.OPEN && !isSendingFrame) {
                 if (video.readyState >= video.HAVE_CURRENT_DATA) {
                     captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-                    const base64Data = captureCanvas.toDataURL("image/jpeg", 0.75);
+                    const jpegQuality = isMobile ? 0.55 : 0.75;
+                    const base64Data = captureCanvas.toDataURL("image/jpeg", jpegQuality);
 
                     const engineVal = document.getElementById("engineSelect") ? document.getElementById("engineSelect").value : "motion";
                     const speedLimitVal = speedLimitInput ? (parseFloat(speedLimitInput.value) || 50.0) : 50.0;
@@ -215,6 +232,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         roi_distance: roiDistanceVal
                     };
 
+                    lastSendTime = now;
                     isSendingFrame = true;
                     ws.send(JSON.stringify(payload));
                 }
