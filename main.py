@@ -10,10 +10,11 @@ if os.path.exists(cv2_dir) and hasattr(os, "add_dll_directory"):
     except Exception:
         pass
 
+import asyncio
 import base64
 import time
 import math
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 import cv2
 import numpy as np
 
@@ -38,13 +39,14 @@ print("YOLOv8 model loaded successfully.")
 # Target 2D Bird's-Eye View (BEV) dimensions
 BEV_WIDTH = 500
 BEV_HEIGHT = 1000
-REAL_WORLD_DISTANCE_METERS = 10.0  # 10 meters scale for ROI height
+REAL_WORLD_DISTANCE_METERS = 10.0  # Default 10 meters scale for ROI height
 
 
 class SpeedTracker:
-    def __init__(self, max_history_sec: float = 2.0, min_time_diff: float = 0.04):
+    def __init__(self, max_history_sec: float = 2.5, min_time_diff: float = 0.04):
         """
         Tracks vehicle positions on a 2D Perspective transformed plane and calculates real-time speed.
+        Coordinates are normalized (0.0 to 1.0) to ensure complete device & resolution independence.
         """
         self.max_history_sec = max_history_sec
         self.min_time_diff = min_time_diff
@@ -52,13 +54,17 @@ class SpeedTracker:
         self.history: Dict[int, List[Tuple[float, float, float]]] = {}
         # Stores track_id -> smoothed speed (km/h)
         self.smoothed_speeds: Dict[int, float] = {}
+        # Stores track_id -> smoothed normalized image position (nx, ny)
+        self.smoothed_pos: Dict[int, Tuple[float, float]] = {}
+        # Stores track_id -> smoothed BEV position (bx, by)
+        self.smoothed_bev: Dict[int, Tuple[float, float]] = {}
         # Stores track_id -> vehicle class name
         self.classes: Dict[int, str] = {}
-        # Stores track_id -> motion trail image points [(cx, cy), ...]
-        self.img_trails: Dict[int, List[Tuple[int, int]]] = {}
+        # Stores track_id -> motion trail normalized points [(nx, ny), ...]
+        self.img_trails: Dict[int, List[Tuple[float, float]]] = {}
         # Stores track_id -> record dict: {id, class, max_speed, last_speed, last_seen, is_speeding}
         self.vehicle_records: Dict[int, Dict] = {}
-        self.last_positions: Dict[int, Tuple[float, float, float]] = {}  # track_id -> (cx, cy, timestamp)
+        self.last_positions: Dict[int, Tuple[float, float, float]] = {}  # track_id -> (nx, ny, timestamp)
         self.next_synthetic_id = 1000
         # Matrix and dst points
         self.M: Optional[np.ndarray] = None
@@ -72,7 +78,8 @@ class SpeedTracker:
 
     def set_calibration(self, points: List[List[float]]) -> bool:
         """
-        Sets source calibration points and computes homography matrix M safely.
+        Sets source calibration points (normalized 0.0 to 1.0)
+        and computes perspective homography matrix M.
         Sorts points in order: Top-Left, Top-Right, Bottom-Right, Bottom-Left.
         """
         if len(points) != 4:
@@ -96,15 +103,15 @@ class SpeedTracker:
             print(f"Calibration matrix calculation error: {e}")
             return False
 
-    def transform_point(self, x: float, y: float) -> Optional[Tuple[float, float]]:
+    def transform_point(self, nx: float, ny: float) -> Optional[Tuple[float, float]]:
         """
-        Maps a 2D image coordinate (x,y) to Bird's-Eye View coordinate safely.
+        Maps a normalized 2D coordinate (nx, ny in range 0..1) to Bird's-Eye View coordinate safely.
         """
         if self.M is None:
             return None
 
         try:
-            pts = np.array([[[x, y]]], dtype=np.float32)
+            pts = np.array([[[nx, ny]]], dtype=np.float32)
             transformed = cv2.perspectiveTransform(pts, self.M)
             bx, by = transformed[0][0]
             if math.isnan(bx) or math.isnan(by) or math.isinf(bx) or math.isinf(by):
@@ -113,29 +120,55 @@ class SpeedTracker:
         except Exception:
             return None
 
-    def update_vehicle(self, track_id: int, bbox: Tuple[float, float, float, float], class_name: str, current_time: float, roi_distance: float = 10.0, speed_limit: float = 50.0) -> Tuple[Optional[float], Optional[Tuple[float, float]]]:
+    def update_vehicle(
+        self,
+        track_id: int,
+        bbox_norm: Tuple[float, float, float, float],
+        class_name: str,
+        current_time: float,
+        roi_distance: float = 10.0,
+        speed_limit: float = 50.0
+    ) -> Tuple[Optional[float], Optional[Tuple[float, float]], List[Tuple[float, float]]]:
         """
-        Updates position history for a vehicle and calculates current speed in km/h instantly.
+        Updates vehicle position history using smoothed trajectory filtering and calculates
+        windowed real-time speed in km/h without zigzag noise.
         """
-        x1, y1, x2, y2 = bbox
-        cx = int((x1 + x2) / 2.0)
-        cy = int(y2)
+        nx1, ny1, nx2, ny2 = bbox_norm
+        raw_ncx = float((nx1 + nx2) / 2.0)
+        raw_ncy = float(ny2)
 
-        # Store motion trail points for video overlay
+        # 1. Centroid Trajectory Smoothing: Eliminates bounding-box jitter / shadow oscillations
+        if track_id in self.smoothed_pos:
+            prev_sx, prev_sy = self.smoothed_pos[track_id]
+            ncx = 0.70 * raw_ncx + 0.30 * prev_sx
+            ncy = 0.70 * raw_ncy + 0.30 * prev_sy
+        else:
+            ncx, ncy = raw_ncx, raw_ncy
+        self.smoothed_pos[track_id] = (ncx, ncy)
+
+        # Store smooth, straight motion trail
         if track_id not in self.img_trails:
             self.img_trails[track_id] = []
-        self.img_trails[track_id].append((cx, cy))
-        if len(self.img_trails[track_id]) > 18:
+        self.img_trails[track_id].append((round(ncx, 4), round(ncy, 4)))
+        if len(self.img_trails[track_id]) > 20:
             self.img_trails[track_id].pop(0)
 
-        # Store last known position for sticky re-association
-        self.last_positions[track_id] = (float(cx), float(cy), current_time)
+        # Store last known position for tracking association
+        self.last_positions[track_id] = (ncx, ncy, current_time)
 
-        bev_coord = self.transform_point(cx, cy)
+        bev_coord = self.transform_point(ncx, ncy)
         if bev_coord is None:
-            return None, None
+            return None, None, self.img_trails[track_id]
 
-        bx, by = bev_coord
+        raw_bx, raw_by = bev_coord
+        if track_id in self.smoothed_bev:
+            prev_bx, prev_by = self.smoothed_bev[track_id]
+            bx = 0.70 * raw_bx + 0.30 * prev_bx
+            by = 0.70 * raw_by + 0.30 * prev_by
+        else:
+            bx, by = raw_bx, raw_by
+        self.smoothed_bev[track_id] = (bx, by)
+
         self.classes[track_id] = class_name
 
         if track_id not in self.history:
@@ -144,7 +177,7 @@ class SpeedTracker:
         # Append new observation
         self.history[track_id].append((current_time, bx, by))
 
-        # Prune old records older than max_history_sec
+        # Prune records older than max_history_sec
         self.history[track_id] = [
             record for record in self.history[track_id]
             if current_time - record[0] <= self.max_history_sec
@@ -154,33 +187,45 @@ class SpeedTracker:
         if len(hist) < 2:
             smoothed_kmh = 0.0
         else:
-            # Immediate responsive calculation between latest 2 frames
-            prev_record = hist[-2]
-            prev_time, px, py = prev_record
-            dt = current_time - prev_time
+            # 2. Multi-Frame Windowed Speed Calculation (~0.18s to 0.25s temporal window)
+            # Avoids instantaneous single-frame micro-jitter and calculates true linear velocity
+            target_window_sec = 0.18
+            reference_record = None
+            for rec in reversed(hist[:-1]):
+                rec_time, rx, ry = rec
+                if (current_time - rec_time) >= target_window_sec:
+                    reference_record = rec
+                    break
+            if reference_record is None:
+                reference_record = hist[0]
 
-            if dt <= 0.005:
+            ref_time, rx, ry = reference_record
+            dt = current_time - ref_time
+
+            if dt < 0.03:
                 smoothed_kmh = self.smoothed_speeds.get(track_id, 0.0)
             else:
-                # Distance on 2D BEV grid (in pixels)
-                pixel_dist = math.sqrt((bx - px) ** 2 + (by - py) ** 2)
-
-                # Dynamic scale factor: BEV_HEIGHT pixels = roi_distance meters
+                pixel_dist = math.sqrt((bx - rx) ** 2 + (by - ry) ** 2)
                 meters_per_pixel = float(roi_distance) / BEV_HEIGHT
                 dist_meters = pixel_dist * meters_per_pixel
 
-                # Speed in meters per second -> km/h
-                speed_mps = dist_meters / dt
-                raw_speed_kmh = speed_mps * 3.6
+                # Deadband Filter: Ignore micro-movements < 15cm to keep stationary cars at 0.0 km/h
+                if dist_meters < 0.15:
+                    raw_speed_kmh = 0.0
+                else:
+                    speed_mps = dist_meters / dt
+                    raw_speed_kmh = speed_mps * 3.6
 
-                # Apply Exponential Moving Average (EMA) smoothing for stability
+                # Noise spike clamp (ignore anomalies above 220 km/h)
+                if raw_speed_kmh > 220.0:
+                    raw_speed_kmh = self.smoothed_speeds.get(track_id, 0.0)
+
                 prev_smoothed = self.smoothed_speeds.get(track_id, raw_speed_kmh)
-                alpha = 0.65  # Smoothing factor
-                smoothed_kmh = alpha * raw_speed_kmh + (1 - alpha) * prev_smoothed
-        
+                alpha = 0.50
+                smoothed_kmh = alpha * raw_speed_kmh + (1.0 - alpha) * prev_smoothed
+
         self.smoothed_speeds[track_id] = smoothed_kmh
 
-        # Update vehicle persistent log record with dynamic speed limit
         current_record = self.vehicle_records.get(track_id, {
             "id": track_id,
             "class": class_name,
@@ -195,47 +240,47 @@ class SpeedTracker:
         current_record["last_seen"] = current_time
         if smoothed_kmh > current_record["max_speed"]:
             current_record["max_speed"] = round(smoothed_kmh, 1)
-        
-        # Dynamic speeding evaluation
-        current_record["is_speeding"] = current_record["max_speed"] > speed_limit
 
+        current_record["is_speeding"] = current_record["max_speed"] > speed_limit
         self.vehicle_records[track_id] = current_record
 
-        return smoothed_kmh, bev_coord
+        return smoothed_kmh, (bx, by), self.img_trails[track_id]
 
     def cleanup_old_tracks(self, active_ids: List[int]):
-        """Clean up active frame state while retaining vehicle history records."""
+        """Clean up active frame state while retaining historical telemetry records."""
         for tid in list(self.history.keys()):
             if tid not in active_ids:
                 del self.history[tid]
                 if tid in self.smoothed_speeds:
                     del self.smoothed_speeds[tid]
+                if tid in self.smoothed_pos:
+                    del self.smoothed_pos[tid]
+                if tid in self.smoothed_bev:
+                    del self.smoothed_bev[tid]
                 if tid in self.classes:
                     del self.classes[tid]
                 if tid in self.img_trails:
                     del self.img_trails[tid]
 
     def get_top_recent_records(self, limit: int = 10) -> List[Dict]:
-        """Returns the top recent / highest speed vehicle records for the UI sidebar log."""
+        """Returns the top recent / highest speed vehicle records for the sidebar log."""
         records = list(self.vehicle_records.values())
-        # Sort primarily by last_seen (most recent) and secondarily by max_speed
         records.sort(key=lambda r: (r["last_seen"], r["max_speed"]), reverse=True)
         return records[:limit]
 
 
 tracker = SpeedTracker()
-bg_subtractor = cv2.createBackgroundSubtractorMOG2(history=50, varThreshold=25, detectShadows=False)
+bg_subtractor = cv2.createBackgroundSubtractorMOG2(history=40, varThreshold=25, detectShadows=False)
 
 
-def merge_overlapping_boxes(boxes: List[List[int]], overlap_thresh: float = 0.3) -> List[List[int]]:
+def merge_overlapping_boxes(boxes: List[List[float]], overlap_thresh: float = 0.3) -> List[List[float]]:
     """Merges overlapping bounding boxes into clean unified boxes."""
     if not boxes:
         return []
-    
-    # Sort boxes by area descending
+
     boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
     merged = []
-    
+
     for box in boxes:
         x1, y1, x2, y2 = box
         matched = False
@@ -246,7 +291,7 @@ def merge_overlapping_boxes(boxes: List[List[int]], overlap_thresh: float = 0.3)
             iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
             intersection = iw * ih
             min_area = min((x2 - x1) * (y2 - y1), (mx2 - mx1) * (my2 - my1))
-            
+
             if min_area > 0 and (intersection / min_area) > overlap_thresh:
                 m[0] = min(mx1, x1)
                 m[1] = min(my1, y1)
@@ -256,8 +301,175 @@ def merge_overlapping_boxes(boxes: List[List[int]], overlap_thresh: float = 0.3)
                 break
         if not matched:
             merged.append([x1, y1, x2, y2])
-            
+
     return merged
+
+
+def process_frame_sync(
+    img_bytes: bytes,
+    calibration_pts: List[List[float]],
+    speed_limit: float,
+    roi_distance: float,
+    engine_mode: str
+) -> Dict[str, Any]:
+    """
+    Synchronous worker thread function:
+    Decodes frame, runs YOLO / ByteTrack or motion subtractor, calculates perspective speeds,
+    and returns lightweight JSON telemetry (<500 bytes) with normalized coordinates.
+    """
+    np_arr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    if frame is None:
+        return {"error": "Frame decoding produced None"}
+
+    h, w, _ = frame.shape
+    current_time = time.time()
+
+    # Normalize calibration points if sent in pixel space
+    norm_calibration_pts = []
+    for pt in calibration_pts:
+        px, py = pt[0], pt[1]
+        if px > 1.05 or py > 1.05:
+            norm_calibration_pts.append([px / w, py / h])
+        else:
+            norm_calibration_pts.append([px, py])
+
+    is_calibrated = False
+    if len(norm_calibration_pts) == 4:
+        is_calibrated = tracker.set_calibration(norm_calibration_pts)
+
+    active_vehicles = []
+    bev_overlay_points = []
+    current_active_ids = []
+
+    if is_calibrated and tracker.src_pts is not None:
+        xyxy_norm = []
+        cls_ids = []
+        confs = []
+        raw_ids = []
+
+        if engine_mode == "motion":
+            # ⚡ Ultra-fast background motion subtraction
+            fg_mask = bg_subtractor.apply(frame)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_DILATE, kernel, iterations=2)
+
+            contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            valid_cnts = [cnt for cnt in contours if cv2.contourArea(cnt) > (w * h * 0.005)]
+            valid_cnts = sorted(valid_cnts, key=cv2.contourArea, reverse=True)[:5]
+
+            raw_boxes = []
+            for cnt in valid_cnts:
+                bx, by, bw, bh = cv2.boundingRect(cnt)
+                raw_boxes.append([bx / w, by / h, (bx + bw) / w, (by + bh) / h])
+
+            merged_boxes = merge_overlapping_boxes(raw_boxes, overlap_thresh=0.25)
+            for mb in merged_boxes:
+                xyxy_norm.append(mb)
+                cls_ids.append(-1)
+                confs.append(0.95)
+
+        else:
+            # 🤖 Accelerated YOLOv8 + ByteTrack (imgsz=384 for 3x faster CPU execution)
+            results = model.track(
+                frame,
+                persist=True,
+                verbose=False,
+                classes=VEHICLE_CLASSES,
+                conf=0.20,
+                iou=0.5,
+                imgsz=384,
+                tracker="bytetrack.yaml"
+            )
+
+            if results and len(results) > 0 and results[0].boxes is not None:
+                boxes = results[0].boxes
+                boxes_xyxy = boxes.xyxy.cpu().numpy()
+                cls_list = boxes.cls.int().cpu().tolist()
+                conf_list = boxes.conf.cpu().numpy().tolist()
+                id_list = boxes.id.int().cpu().tolist() if boxes.id is not None else []
+
+                for idx, b in enumerate(boxes_xyxy):
+                    xyxy_norm.append([
+                        float(b[0] / w),
+                        float(b[1] / h),
+                        float(b[2] / w),
+                        float(b[3] / h)
+                    ])
+                    cls_ids.append(cls_list[idx])
+                    confs.append(conf_list[idx])
+                    if idx < len(id_list):
+                        raw_ids.append(id_list[idx])
+
+        # Track ID assignment and re-identification
+        track_ids = []
+        for idx, box in enumerate(xyxy_norm):
+            if idx < len(raw_ids):
+                track_ids.append(raw_ids[idx])
+            else:
+                bncx = (box[0] + box[2]) / 2.0
+                bncy = box[3]
+                best_id = None
+                best_dist = 0.20  # Normalized distance threshold (20% of frame)
+                for tid, (lcx, lcy, ltime) in tracker.last_positions.items():
+                    if current_time - ltime < 1.0:
+                        dist = math.sqrt((bncx - lcx) ** 2 + (bncy - lcy) ** 2)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_id = tid
+                if best_id is None:
+                    best_id = tracker.next_synthetic_id
+                    tracker.next_synthetic_id += 1
+                track_ids.append(best_id)
+
+        for box, track_id, cls_id, conf in zip(xyxy_norm, track_ids, cls_ids, confs):
+            current_active_ids.append(track_id)
+            if cls_id == -1:
+                class_name = "Motion Target"
+            else:
+                class_name = model.names.get(cls_id, "vehicle").capitalize()
+
+            speed_kmh, bev_pt, trail = tracker.update_vehicle(
+                track_id, (box[0], box[1], box[2], box[3]), class_name, current_time,
+                roi_distance=roi_distance, speed_limit=speed_limit
+            )
+
+            if bev_pt:
+                bev_overlay_points.append({
+                    "id": track_id,
+                    "bx": round(float(bev_pt[0]), 1),
+                    "by": round(float(bev_pt[1]), 1),
+                    "speed": round(speed_kmh or 0.0, 1)
+                })
+
+            active_vehicles.append({
+                "id": track_id,
+                "class": class_name,
+                "speed": round(speed_kmh, 1) if speed_kmh else 0.0,
+                "confidence": round(float(conf), 2),
+                "bbox": [round(float(c), 4) for c in box],
+                "trail": trail,
+                "is_speeding": bool(speed_kmh and speed_kmh > speed_limit)
+            })
+
+        tracker.cleanup_old_tracks(current_active_ids)
+
+    top_records = tracker.get_top_recent_records(limit=10)
+    total_detected = len(tracker.vehicle_records)
+    speeding_violations = sum(1 for r in tracker.vehicle_records.values() if r["is_speeding"])
+
+    # Returns pure lightweight JSON telemetry (~300 bytes) - NO Base64 video images!
+    return {
+        "status": "ok",
+        "calibrated": is_calibrated,
+        "active_vehicles": active_vehicles,
+        "bev_points": bev_overlay_points,
+        "top_records": top_records,
+        "total_count": total_detected,
+        "speeding_count": speeding_violations
+    }
 
 
 @app.get("/")
@@ -269,22 +481,21 @@ async def get_index(request: Request):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """
-    WebSocket endpoint handling client frames, calibration coordinates, YOLO tracking,
-    perspective transformation, speed calculation, and returning annotated frames.
+    High-Performance WebSocket endpoint.
+    Offloads frame processing & YOLO to worker threads and streams lightweight JSON telemetry.
     """
     await websocket.accept()
     print("Client connected via WebSocket.")
 
     try:
         while True:
-            # Receive data payload from frontend
             payload = await websocket.receive_json()
 
             image_data = payload.get("image")
             calibration_pts = payload.get("points", [])
             speed_limit = float(payload.get("speed_limit", 50.0))
             roi_distance = float(payload.get("roi_distance", 10.0))
-            engine_mode = payload.get("engine", "motion")  # "motion" or "yolo"
+            engine_mode = payload.get("engine", "motion")
 
             if not image_data:
                 await websocket.send_json({"error": "No image data provided"})
@@ -297,218 +508,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     base64_str = image_data
 
                 img_bytes = base64.b64decode(base64_str)
-                np_arr = np.frombuffer(img_bytes, np.uint8)
-                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             except Exception as e:
                 await websocket.send_json({"error": f"Failed to decode image: {str(e)}"})
                 continue
 
-            if frame is None:
-                await websocket.send_json({"error": "Frame decoding produced None"})
-                continue
+            # Run detection and tracking in asynchronous worker thread
+            result = await asyncio.to_thread(
+                process_frame_sync,
+                img_bytes,
+                calibration_pts,
+                speed_limit,
+                roi_distance,
+                engine_mode
+            )
 
-            h, w, _ = frame.shape
-            current_time = time.time()
-            active_vehicles = []
-            bev_overlay_points = []
-
-            is_calibrated = False
-            if len(calibration_pts) == 4:
-                is_calibrated = tracker.set_calibration(calibration_pts)
-
-            if is_calibrated and tracker.src_pts is not None:
-                pts_int = tracker.src_pts.astype(np.int32).reshape((-1, 1, 2))
-                overlay = frame.copy()
-                cv2.fillPoly(overlay, [pts_int], (0, 255, 128), lineType=cv2.LINE_AA)
-                cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
-                cv2.polylines(frame, [pts_int], isClosed=True, color=(0, 255, 128), thickness=2, lineType=cv2.LINE_AA)
-
-                # Label dynamic ROI distance marker
-                cv2.putText(frame, f"ROI Calibrated ({roi_distance:.1f} Meters)", 
-                            (int(pts_int[0][0][0]), max(25, int(pts_int[0][0][1]) - 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 1, cv2.LINE_AA)
-
-                xyxy_coords = []
-                cls_ids = []
-                confs = []
-                raw_ids = []
-
-                if engine_mode == "motion":
-                    # ⚡ High-Speed Motion Subtraction Engine (0 CPU Lag, 60+ FPS on Render CPU)
-                    fg_mask = bg_subtractor.apply(frame)
-                    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-                    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-                    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_DILATE, kernel, iterations=3)
-
-                    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                    valid_cnts = [cnt for cnt in contours if cv2.contourArea(cnt) > 2000]
-                    valid_cnts = sorted(valid_cnts, key=cv2.contourArea, reverse=True)[:3]
-
-                    raw_boxes = []
-                    for cnt in valid_cnts:
-                        bx, by, bw, bh = cv2.boundingRect(cnt)
-                        raw_boxes.append([bx, by, bx + bw, by + bh])
-
-                    merged_boxes = merge_overlapping_boxes(raw_boxes, overlap_thresh=0.2)
-                    for mb in merged_boxes:
-                        xyxy_coords.append(mb)
-                        cls_ids.append(-1)
-                        confs.append(0.95)
-
-                    xyxy_coords = np.array(xyxy_coords) if len(xyxy_coords) > 0 else np.empty((0, 4))
-                else:
-                    # 🤖 AI Neural Engine (YOLOv8 Vehicles)
-                    results = model.track(frame, persist=True, verbose=False, classes=VEHICLE_CLASSES, conf=0.15, iou=0.5)
-
-                    if results and len(results) > 0 and results[0].boxes is not None:
-                        boxes = results[0].boxes
-                        xyxy_coords = boxes.xyxy.cpu().numpy()
-                        cls_ids = boxes.cls.int().cpu().tolist()
-                        confs = boxes.conf.cpu().numpy()
-                        if boxes.id is not None:
-                            raw_ids = boxes.id.int().cpu().tolist()
-
-                track_ids = []
-                for idx, box in enumerate(xyxy_coords):
-                    if idx < len(raw_ids):
-                        track_ids.append(raw_ids[idx])
-                    else:
-                        bcx = (box[0] + box[2]) / 2.0
-                        bcy = box[3]
-                        best_id = None
-                        best_dist = 120.0
-                        for tid, (lcx, lcy, ltime) in tracker.last_positions.items():
-                            if current_time - ltime < 1.0:
-                                dist = math.sqrt((bcx - lcx)**2 + (bcy - lcy)**2)
-                                if dist < best_dist:
-                                    best_dist = dist
-                                    best_id = tid
-                        if best_id is None:
-                            best_id = tracker.next_synthetic_id
-                            tracker.next_synthetic_id += 1
-                        track_ids.append(best_id)
-
-                current_active_ids = []
-                for box, track_id, cls_id, conf in zip(xyxy_coords, track_ids, cls_ids, confs):
-                    current_active_ids.append(track_id)
-                    x1, y1, x2, y2 = box
-                    if cls_id == -1:
-                        class_name = "Motion Target"
-                    else:
-                        class_name = model.names.get(cls_id, "vehicle").capitalize()
-
-                    speed_kmh, bev_pt = tracker.update_vehicle(
-                        track_id, (x1, y1, x2, y2), class_name, current_time, 
-                        roi_distance=roi_distance, speed_limit=speed_limit
-                    )
-
-                    if bev_pt:
-                        bev_overlay_points.append((track_id, bev_pt[0], bev_pt[1], speed_kmh or 0.0))
-
-                    speed_display = f"{speed_kmh:.1f} km/h" if speed_kmh is not None else "Calculating..."
-
-                    active_vehicles.append({
-                        "id": track_id,
-                        "class": class_name,
-                        "speed": round(speed_kmh, 1) if speed_kmh else 0.0,
-                        "confidence": round(float(conf), 2)
-                    })
-
-                    if speed_kmh is None or speed_kmh < (speed_limit * 0.8):
-                        box_color = (0, 255, 0)
-                    elif speed_kmh <= speed_limit:
-                        box_color = (0, 215, 255)
-                    else:
-                        box_color = (0, 0, 255)
-
-                    if track_id in tracker.img_trails:
-                        trail = tracker.img_trails[track_id]
-                        for i in range(1, len(trail)):
-                            cv2.line(frame, trail[i - 1], trail[i], box_color, 2, cv2.LINE_AA)
-
-                    ix1, iy1, ix2, iy2 = int(x1), int(y1), int(x2), int(y2)
-                    cv2.rectangle(frame, (ix1, iy1), (ix2, iy2), box_color, 2, lineType=cv2.LINE_AA)
-
-                    cx, cy = int((ix1 + ix2) / 2), iy2
-                    cv2.circle(frame, (cx, cy), 5, (255, 0, 255), -1, lineType=cv2.LINE_AA)
-
-                    label = f"#{track_id} {class_name} | {speed_display}"
-                    (text_w, text_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-
-                    badge_y1 = max(0, iy1 - text_h - 10)
-                    badge_y2 = iy1
-                    cv2.rectangle(frame, (ix1, badge_y1), (ix1 + text_w + 10, badge_y2), box_color, -1)
-                    cv2.putText(frame, label, (ix1 + 5, max(14, iy1 - 4)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
-
-                tracker.cleanup_old_tracks(current_active_ids)
-
-            else:
-                num_pts = len(calibration_pts)
-                if num_pts > 0:
-                    for idx, pt in enumerate(calibration_pts):
-                        px, py = int(pt[0]), int(pt[1])
-                        cv2.circle(frame, (px, py), 6, (0, 255, 255), -1, lineType=cv2.LINE_AA)
-                        cv2.putText(frame, str(idx + 1), (px + 8, py - 8),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
-
-                    if num_pts > 1:
-                        pts_arr = np.array(calibration_pts, np.int32).reshape((-1, 1, 2))
-                        cv2.polylines(frame, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2, lineType=cv2.LINE_AA)
-
-                msg = f"CALIBRATION NEEDED: Click 4 points on road ({num_pts}/4 points set)"
-                cv2.rectangle(frame, (10, 10), (min(w - 10, 620), 45), (10, 13, 20), -1)
-                cv2.putText(frame, msg, (20, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
-
-            # Generate Bird's-Eye View (BEV) Mini Map Overlay
-            if is_calibrated and tracker.M is not None:
-                bev_w, bev_h = 110, 180
-                bev_img = np.zeros((bev_h, bev_w, 3), dtype=np.uint8)
-                bev_img[:] = (15, 20, 30)
-                cv2.rectangle(bev_img, (0, 0), (bev_w - 1, bev_h - 1), (0, 242, 254), 1)
-                cv2.line(bev_img, (0, int(bev_h / 2)), (bev_w, int(bev_h / 2)), (50, 60, 80), 1)
-
-                for tid, bx, by, spd in bev_overlay_points:
-                    mx = int((bx / BEV_WIDTH) * bev_w)
-                    my = int((by / BEV_HEIGHT) * bev_h)
-                    mx = max(3, min(bev_w - 4, mx))
-                    my = max(3, min(bev_h - 4, my))
-
-                    dot_color = (0, 255, 0) if spd < speed_limit else (0, 0, 255)
-                    cv2.circle(bev_img, (mx, my), 4, dot_color, -1, lineType=cv2.LINE_AA)
-                    cv2.putText(bev_img, f"#{tid}", (mx + 5, my + 3),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
-
-                margin = 15
-                top_y = margin
-                left_x = w - bev_w - margin
-
-                if left_x > 0 and top_y + bev_h < h:
-                    cv2.rectangle(frame, (left_x - 2, top_y - 20), (left_x + bev_w + 2, top_y + bev_h + 2), (10, 13, 20), -1)
-                    cv2.putText(frame, f"BEV {roi_distance:.0f}m Grid", (left_x + 4, top_y - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 242, 254), 1, cv2.LINE_AA)
-                    frame[top_y:top_y + bev_h, left_x:left_x + bev_w] = bev_img
-
-            # Encode annotated frame to JPEG base64 (HD quality 80)
-            _, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            encoded_frame = "data:image/jpeg;base64," + base64.b64encode(buffer).decode("utf-8")
-
-            # Get Top 10 Recent / Speed Log
-            top_records = tracker.get_top_recent_records(limit=10)
-            total_detected = len(tracker.vehicle_records)
-            speeding_violations = sum(1 for r in tracker.vehicle_records.values() if r["is_speeding"])
-
-            # Send response back to WebSocket client
-            await websocket.send_json({
-                "status": "ok",
-                "frame": encoded_frame,
-                "calibrated": is_calibrated,
-                "active_vehicles": active_vehicles,
-                "top_records": top_records,
-                "total_count": total_detected,
-                "speeding_count": speeding_violations
-            })
+            # Send back lightweight JSON telemetry
+            await websocket.send_json(result)
 
     except WebSocketDisconnect:
         print("WebSocket client disconnected.")

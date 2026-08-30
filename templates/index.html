@@ -158,14 +158,15 @@
                 border-radius: 12px;
             }
             .canvas-wrapper {
+                width: 100%;
                 aspect-ratio: auto;
-                min-height: 280px;
             }
             #displayCanvas {
                 width: 100%;
                 height: auto;
-                max-height: 75vh;
-                object-fit: contain;
+                display: block;
+                border-radius: 12px;
+                object-fit: fill;
             }
             .overlay-instruction {
                 font-size: 0.75rem;
@@ -240,9 +241,13 @@
             border: 1px solid rgba(255, 255, 255, 0.08);
         }
 
-        /* Hidden video element used for webcam capture */
+        /* Offscreen video element used for continuous hardware camera stream */
         #webcam {
-            display: none;
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+            pointer-events: none;
         }
 
         /* 100% edge-to-edge canvas with zero black letterbox padding */
@@ -252,6 +257,9 @@
             display: block;
             border-radius: 12px;
             object-fit: fill;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
         #displayCanvas.calibrating {
