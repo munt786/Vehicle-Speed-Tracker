@@ -47,32 +47,68 @@ document.addEventListener("DOMContentLoaded", () => {
     const captureCtx = captureCanvas.getContext("2d");
 
     /**
-     * Initialize Webcam Feed
+     * Initialize Webcam Feed with Robust Mobile Fallbacks
      */
     async function initWebcam() {
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute("playsinline", "true");
+        video.setAttribute("webkit-playsinline", "true");
+        video.setAttribute("muted", "true");
+        video.setAttribute("autoplay", "true");
+
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: {
-                    width: { ideal: isMobile ? 720 : 1280 },
-                    height: { ideal: isMobile ? 1280 : 720 },
-                    facingMode: "environment"
-                },
-                audio: false
-            });
+            let stream;
+            try {
+                // Try back camera with ideal resolution first
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: { ideal: "environment" },
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    },
+                    audio: false
+                });
+            } catch (err1) {
+                console.warn("Retrying with simple environment constraint...", err1);
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: { facingMode: "environment" },
+                        audio: false
+                    });
+                } catch (err2) {
+                    console.warn("Retrying with standard video constraint...", err2);
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: false
+                    });
+                }
+            }
+
             video.srcObject = stream;
-            await video.play();
+            try {
+                await video.play();
+            } catch (playErr) {
+                console.warn("Autoplay blocked, will resume on touch:", playErr);
+            }
 
             // Wait for camera stream metadata to ensure accurate native dimensions
             if (!video.videoWidth || !video.videoHeight) {
                 await new Promise((resolve) => {
-                    video.onloadedmetadata = () => resolve();
-                    setTimeout(resolve, 500);
+                    const onReady = () => {
+                        video.removeEventListener("loadedmetadata", onReady);
+                        video.removeEventListener("canplay", onReady);
+                        resolve();
+                    };
+                    video.addEventListener("loadedmetadata", onReady);
+                    video.addEventListener("canplay", onReady);
+                    setTimeout(resolve, 800);
                 });
             }
 
             // Set display canvas size to match native camera stream resolution
-            canvas.width = video.videoWidth || (isMobile ? 720 : 1280);
-            canvas.height = video.videoHeight || (isMobile ? 1280 : 720);
+            canvas.width = video.videoWidth || 1280;
+            canvas.height = video.videoHeight || 720;
 
             // Scale compact capture canvas maintaining aspect ratio
             const aspect = canvas.width / canvas.height;
@@ -93,9 +129,18 @@ document.addEventListener("DOMContentLoaded", () => {
             console.error("Camera access error:", err);
             statusText.textContent = "Camera Error: " + err.message;
             statusDot.classList.remove("connected");
-            alert("Could not access camera. Please ensure camera permissions are allowed.");
+            alert("Could not access camera. Please ensure camera permissions are allowed in your browser settings.");
         }
     }
+
+    // Touch/click listener to unlock video playback on strict mobile browsers
+    const unlockVideo = () => {
+        if (video.srcObject && video.paused) {
+            video.play().catch(() => {});
+        }
+    };
+    window.addEventListener("touchstart", unlockVideo, { passive: true });
+    window.addEventListener("click", unlockVideo, { passive: true });
 
     /**
      * Initialize WebSocket Connection to Backend
@@ -148,16 +193,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     /**
      * 🚀 60 FPS Hardware Video & Vector HUD Render Loop
-     * Paints local video feed at 60 FPS and overlays AI telemetry on top.
+     * Renders crisp vector HUD overlays (bounding boxes, speed pills, trails, radar)
+     * floating on top of the native hardware camera video stream.
      */
     function renderLoop() {
-        // 1. Draw raw camera feed directly from video element
-        if (video.readyState >= video.HAVE_CURRENT_DATA) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        } else {
-            ctx.fillStyle = "#0a0d14";
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-        }
+        // Clear HUD overlay canvas (transparent background over native video element)
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         const speedLimit = speedLimitInput ? (parseFloat(speedLimitInput.value) || 50.0) : 50.0;
         const roiDistance = roiDistanceInput ? (parseFloat(roiDistanceInput.value) || 10.0) : 10.0;
@@ -179,20 +220,7 @@ document.addEventListener("DOMContentLoaded", () => {
      * Draws calibration polygon, region of interest tint, and clickable corner points
      */
     function drawCalibrationHUD(roiDistance) {
-        if (calibrationPoints.length === 0) {
-            // Draw calibration needed banner
-            ctx.save();
-            ctx.fillStyle = "rgba(10, 13, 20, 0.85)";
-            ctx.fillRect(10, 10, Math.min(canvas.width - 20, 520), 40);
-            ctx.strokeStyle = "#00f2fe";
-            ctx.lineWidth = 1;
-            ctx.strokeRect(10, 10, Math.min(canvas.width - 20, 520), 40);
-            ctx.fillStyle = "#00f2fe";
-            ctx.font = "bold 14px 'Outfit', sans-serif";
-            ctx.fillText("CALIBRATION NEEDED: Click 4 points on road to start tracking", 20, 35);
-            ctx.restore();
-            return;
-        }
+        if (calibrationPoints.length === 0) return;
 
         ctx.save();
 
@@ -205,7 +233,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
             if (calibrationPoints.length === 4) {
                 ctx.closePath();
-                ctx.fillStyle = "rgba(0, 255, 128, 0.12)";
+                ctx.fillStyle = "rgba(0, 255, 128, 0.15)";
                 ctx.fill();
 
                 // Labeled ROI distance marker
@@ -215,7 +243,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
 
             ctx.strokeStyle = "#00ff80";
-            ctx.lineWidth = 2;
+            ctx.lineWidth = 2.5;
             ctx.setLineDash(calibrationPoints.length === 4 ? [] : [6, 4]);
             ctx.stroke();
         }
@@ -223,10 +251,10 @@ document.addEventListener("DOMContentLoaded", () => {
         // Draw handle corner pins
         calibrationPoints.forEach((pt, idx) => {
             ctx.beginPath();
-            ctx.arc(pt[0], pt[1], 6, 0, 2 * Math.PI);
+            ctx.arc(pt[0], pt[1], 7, 0, 2 * Math.PI);
             ctx.fillStyle = "#00ff80";
             ctx.shadowColor = "#00ff80";
-            ctx.shadowBlur = 8;
+            ctx.shadowBlur = 10;
             ctx.fill();
             ctx.lineWidth = 2;
             ctx.strokeStyle = "#ffffff";
@@ -234,8 +262,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
             ctx.shadowBlur = 0;
             ctx.fillStyle = "#ffffff";
-            ctx.font = "bold 12px 'Outfit', sans-serif";
-            ctx.fillText(`P${idx + 1}`, pt[0] + 8, pt[1] - 8);
+            ctx.font = "bold 13px 'Outfit', sans-serif";
+            ctx.fillText(`P${idx + 1}`, pt[0] + 10, pt[1] - 8);
         });
 
         ctx.restore();
@@ -259,7 +287,6 @@ document.addEventListener("DOMContentLoaded", () => {
             const bw = Math.max(10, x2 - x1);
             const bh = Math.max(10, y2 - y1);
             const speed = v.speed || 0.0;
-            const isSpeeding = v.is_speeding || (speed > speedLimit);
 
             // Determine color palette based on speed
             let themeColor = "#00e676"; // Emerald Green
@@ -386,7 +413,7 @@ document.addEventListener("DOMContentLoaded", () => {
     function startStreaming() {
         function sendFrameLoop() {
             const now = Date.now();
-            const minInterval = isMobile ? 65 : 40; // 15 FPS mobile, 25 FPS desktop
+            const minInterval = 33; // 30 FPS for instant fast-vehicle tracking
 
             if ((now - lastSendTime >= minInterval) && ws && ws.readyState === WebSocket.OPEN && !isSendingFrame) {
                 if (video.readyState >= video.HAVE_CURRENT_DATA) {
@@ -481,8 +508,14 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // pointerdown handles mouse, pen, and mobile touch uniformly
+    // Register pointerdown & touchstart on both canvas and wrapper to guarantee mobile touch capture
     canvas.addEventListener("pointerdown", handleCalibrationInput, { passive: false });
+    canvas.addEventListener("touchstart", handleCalibrationInput, { passive: false });
+    const canvasWrapperElem = document.querySelector(".canvas-wrapper");
+    if (canvasWrapperElem) {
+        canvasWrapperElem.addEventListener("pointerdown", handleCalibrationInput, { passive: false });
+        canvasWrapperElem.addEventListener("touchstart", handleCalibrationInput, { passive: false });
+    }
 
     /**
      * Toggle Calibration Mode

@@ -187,41 +187,26 @@ class SpeedTracker:
         if len(hist) < 2:
             smoothed_kmh = 0.0
         else:
-            # 2. Multi-Frame Windowed Speed Calculation (~0.18s to 0.25s temporal window)
-            # Avoids instantaneous single-frame micro-jitter and calculates true linear velocity
-            target_window_sec = 0.18
-            reference_record = None
-            for rec in reversed(hist[:-1]):
-                rec_time, rx, ry = rec
-                if (current_time - rec_time) >= target_window_sec:
-                    reference_record = rec
-                    break
-            if reference_record is None:
-                reference_record = hist[0]
+            # Instant 2-Frame Velocity Calculation (Instant response within 30ms)
+            prev_record = hist[-2]
+            prev_time, px, py = prev_record
+            dt = current_time - prev_time
 
-            ref_time, rx, ry = reference_record
-            dt = current_time - ref_time
-
-            if dt < 0.03:
+            if dt <= 0.005:
                 smoothed_kmh = self.smoothed_speeds.get(track_id, 0.0)
             else:
-                pixel_dist = math.sqrt((bx - rx) ** 2 + (by - ry) ** 2)
+                pixel_dist = math.sqrt((bx - px) ** 2 + (by - py) ** 2)
                 meters_per_pixel = float(roi_distance) / BEV_HEIGHT
                 dist_meters = pixel_dist * meters_per_pixel
 
-                # Deadband Filter: Ignore micro-movements < 15cm to keep stationary cars at 0.0 km/h
-                if dist_meters < 0.15:
-                    raw_speed_kmh = 0.0
-                else:
-                    speed_mps = dist_meters / dt
-                    raw_speed_kmh = speed_mps * 3.6
+                speed_mps = dist_meters / dt
+                raw_speed_kmh = speed_mps * 3.6
 
-                # Noise spike clamp (ignore anomalies above 220 km/h)
                 if raw_speed_kmh > 220.0:
                     raw_speed_kmh = self.smoothed_speeds.get(track_id, 0.0)
 
                 prev_smoothed = self.smoothed_speeds.get(track_id, raw_speed_kmh)
-                alpha = 0.50
+                alpha = 0.70
                 smoothed_kmh = alpha * raw_speed_kmh + (1.0 - alpha) * prev_smoothed
 
         self.smoothed_speeds[track_id] = smoothed_kmh
@@ -372,14 +357,14 @@ def process_frame_sync(
                 confs.append(0.95)
 
         else:
-            # 🤖 Accelerated YOLOv8 + ByteTrack (imgsz=384 for 3x faster CPU execution)
+            # 🤖 High-Sensitivity YOLOv8 (conf=0.15 for fast vehicles, screen/GIF tests, and motion blur)
             results = model.track(
                 frame,
                 persist=True,
                 verbose=False,
                 classes=VEHICLE_CLASSES,
-                conf=0.20,
-                iou=0.5,
+                conf=0.15,
+                iou=0.45,
                 imgsz=384,
                 tracker="bytetrack.yaml"
             )
@@ -403,7 +388,7 @@ def process_frame_sync(
                     if idx < len(id_list):
                         raw_ids.append(id_list[idx])
 
-        # Track ID assignment and re-identification
+        # Track ID assignment and high-speed vehicle re-identification
         track_ids = []
         for idx, box in enumerate(xyxy_norm):
             if idx < len(raw_ids):
@@ -412,9 +397,9 @@ def process_frame_sync(
                 bncx = (box[0] + box[2]) / 2.0
                 bncy = box[3]
                 best_id = None
-                best_dist = 0.20  # Normalized distance threshold (20% of frame)
+                best_dist = 0.40  # Broadened to 40% of screen to follow fast vehicles seamlessly
                 for tid, (lcx, lcy, ltime) in tracker.last_positions.items():
-                    if current_time - ltime < 1.0:
+                    if current_time - ltime < 1.2:
                         dist = math.sqrt((bncx - lcx) ** 2 + (bncy - lcy) ** 2)
                         if dist < best_dist:
                             best_dist = dist
